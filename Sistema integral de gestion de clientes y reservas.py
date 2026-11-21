@@ -32,6 +32,10 @@ LOG = configurar_logs()
 class SistemaGestionError(Exception):
     """Excepción base del sistema."""
 
+    def __init__(self, mensaje: str) -> None:
+        LOG.error("%s: %s", type(self).__name__, mensaje)
+        super().__init__(mensaje)
+
 class ValidacionError(SistemaGestionError):
     """Un dato de entrada no cumple las reglas de validación."""
 
@@ -68,7 +72,13 @@ class EntidadSistema(ABC):
 class Cliente(EntidadSistema):
     """Cliente con datos personales validados y encapsulados."""
     EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-    def __init__(self, nombre: str, cedula: int, telefono: int,correo_electronico: str,) -> None:
+    def __init__(
+        self,
+        nombre: str,
+        cedula: Union[str, int],
+        telefono: Union[str, int],
+        correo_electronico: str,
+    ) -> None:
         super().__init__(nombre)
         try:
             self._cedula = self._validar_cedula(cedula)
@@ -80,20 +90,20 @@ class Cliente(EntidadSistema):
 
 #validacion de cedula
     @staticmethod
-    def _validar_cedula(cedula: int) -> int:
-        if not isinstance(cedula, int):
-            raise TypeError("La cédula debe ser un numero entero.")
-        limpia = re.sub(r"[\s.-]", "", cedula)
+    def _validar_cedula(cedula: Union[str, int]) -> str:
+        if not isinstance(cedula, (str, int)):
+            raise TypeError("La cédula debe ser texto o un número entero.")
+        limpia = re.sub(r"[\s.-]", "", str(cedula))
         if not limpia.isdigit() or not 5 <= len(limpia) <= 10:
             raise ValueError("La cédula debe contener entre 5 y 10 dígitos.")
         return limpia
 
 #validacion de telefono
     @staticmethod
-    def _validar_telefono(telefono: int) -> int:
-        if not isinstance(telefono, int):
-            raise TypeError("El teléfono debe ser texto.")
-        limpia = re.sub(r"[\s()+.-]", "", telefono)
+    def _validar_telefono(telefono: Union[str, int]) -> str:
+        if not isinstance(telefono, (str, int)):
+            raise TypeError("El teléfono debe ser texto o un número entero.")
+        limpia = re.sub(r"[\s()+.-]", "", str(telefono))
         if not limpia.isdigit() or not 7 <= len(limpia) <= 15:
             raise ValueError("El teléfono debe contener entre 7 y 15 dígitos.")
         return limpia
@@ -106,11 +116,11 @@ class Cliente(EntidadSistema):
         return correo.strip().lower()
 
     @property
-    def cedula(self) -> int:
+    def cedula(self) -> str:
         return self._cedula
 
     @property
-    def telefono(self) -> int:
+    def telefono(self) -> str:
         return self._telefono
 
     @property
@@ -133,6 +143,8 @@ class Servicio(EntidadSistema, ABC):
     def __init__(self, nombre: str, tarifa: float) -> None:
         super().__init__(nombre)
         try:
+            if isinstance(tarifa, bool):
+                raise TypeError("La tarifa no puede ser un valor booleano.")
             tarifa = float(tarifa)
         except (TypeError, ValueError) as exc:
             LOG.exception("La tarifa del servicio no es numérica.")
@@ -148,8 +160,10 @@ class Servicio(EntidadSistema, ABC):
 
 #precio por duracion del servicio
     @abstractmethod
-    def calcular_precio(self, duracion: float) -> float:
-        """Calcula el costo según la duración del servicio."""
+    def calcular_precio(
+        self, duracion: float, impuesto: float = 0.0, descuento: float = 0.0
+    ) -> float:
+        """Calcula el costo con porcentajes opcionales de impuesto y descuento."""
         raise NotImplementedError
 
 #descripcion del servicio
@@ -177,8 +191,11 @@ class ServicioConsultoria(Servicio):
             raise ValidacionError("La consultoría debe durar entre 1 y 8 horas.")
         return horas
 
-    def calcular_precio(self, duracion: float) -> float:
-        return self.tarifa * self.validar_parametros(duracion)
+    def calcular_precio(
+        self, duracion: float, impuesto: float = 0.0, descuento: float = 0.0
+    ) -> float:
+        subtotal = self.tarifa * self.validar_parametros(duracion)
+        return _aplicar_impuestos_descuento(subtotal, impuesto, descuento)
 
     def describir_servicio(self) -> str:
         return "{}: consultoría por hora.".format(self.nombre)
@@ -190,6 +207,8 @@ class ServicioMantenimiento(Servicio):
     def __init__(self, nombre: str, tarifa: float, cargo_materiales: float = 20.0):
         super().__init__(nombre, tarifa)
         try:
+            if isinstance(cargo_materiales, bool):
+                raise TypeError("El cargo no puede ser un valor booleano.")
             cargo_materiales = float(cargo_materiales)
         except (TypeError, ValueError) as exc:
             LOG.exception("El cargo de materiales no es numérico.")
@@ -204,9 +223,12 @@ class ServicioMantenimiento(Servicio):
             raise ValidacionError("El mantenimiento debe durar entre 1 y 12 horas.")
         return horas
 
-    def calcular_precio(self, duracion: float) -> float:
+    def calcular_precio(
+        self, duracion: float, impuesto: float = 0.0, descuento: float = 0.0
+    ) -> float:
         horas = self.validar_parametros(duracion)
-        return self.tarifa * horas + self._cargo_materiales
+        subtotal = self.tarifa * horas + self._cargo_materiales
+        return _aplicar_impuestos_descuento(subtotal, impuesto, descuento)
 
     def describir_servicio(self) -> str:
         return "{}: mantenimiento por hora más materiales.".format(self.nombre)
@@ -221,13 +243,36 @@ class ServicioPaquete(Servicio):
             raise ValidacionError("El paquete debe durar entre 1 y 10 horas.")
         return horas
 
-    def calcular_precio(self, duracion: float) -> float:
+    def calcular_precio(
+        self, duracion: float, impuesto: float = 0.0, descuento: float = 0.0
+    ) -> float:
         horas = self.validar_parametros(duracion)
         horas_adicionales = max(0.0, horas - 2.0)
-        return self.tarifa + horas_adicionales * (self.tarifa * 0.25)
+        subtotal = self.tarifa + horas_adicionales * (self.tarifa * 0.25)
+        return _aplicar_impuestos_descuento(subtotal, impuesto, descuento)
 
     def describir_servicio(self) -> str:
         return "{}: paquete base para las primeras 2 horas.".format(self.nombre)
+
+#clase servicio reserva de salas
+class ServicioReservaSalas(Servicio):
+    """Reserva de salas con tarifa por hora, de 1 a 12 horas."""
+
+    def validar_parametros(self, duracion: float) -> float:
+        horas = _validar_duracion_numerica(duracion)
+        if not 1 <= horas <= 12:
+            raise ValidacionError("La reserva debe durar entre 1 y 12 horas.")
+        return horas
+
+    def calcular_precio(
+        self, duracion: float, impuesto: float = 0.0, descuento: float = 0.0
+    ) -> float:
+        horas = self.validar_parametros(duracion)
+        subtotal = self.tarifa * horas
+        return _aplicar_impuestos_descuento(subtotal, impuesto, descuento)
+
+    def describir_servicio(self) -> str:
+        return "{}: reserva de salas por hora.".format(self.nombre)
 
 #Clase servicio de alquiler
 class ServicioAlquiler(Servicio):
@@ -239,9 +284,12 @@ class ServicioAlquiler(Servicio):
             raise ValidacionError("La reserva debe durar entre 1 y 124 horas.")
         return horas
 
-    def calcular_precio(self, duracion: float) -> float:
+    def calcular_precio(
+        self, duracion: float, impuesto: float = 0.0, descuento: float = 0.0
+    ) -> float:
         horas = self.validar_parametros(duracion)
-        return self.tarifa * horas
+        subtotal = self.tarifa * horas
+        return _aplicar_impuestos_descuento(subtotal, impuesto, descuento)
 
     def describir_servicio(self) -> str:
         return "{}: alquiler de equipos por hora.".format(self.nombre)
@@ -256,10 +304,13 @@ class ServicioAsesorias(Servicio):
             raise ValidacionError("La asesoría debe durar entre 1 y 5 horas.")
         return horas
 
-    def calcular_precio(self, duracion: float) -> float:
+    def calcular_precio(
+        self, duracion: float, impuesto: float = 0.0, descuento: float = 0.0
+    ) -> float:
         horas = self.validar_parametros(duracion)
         horas_adicionales = max(0.0, horas - 2.0)
-        return self.tarifa + horas_adicionales * (self.tarifa * 0.25)
+        subtotal = self.tarifa + horas_adicionales * (self.tarifa * 0.25)
+        return _aplicar_impuestos_descuento(subtotal, impuesto, descuento)
 
     def describir_servicio(self) -> str:
         return "{}: asesoría con tarifa base para las primeras 2 horas.".format(self.nombre)
@@ -276,6 +327,30 @@ def _validar_duracion_numerica(duracion: float) -> float:
         raise ValidacionError("La duración debe ser un número finito mayor que cero.")
     return horas
 
+
+def _aplicar_impuestos_descuento(
+    subtotal: float, impuesto: float, descuento: float
+) -> float:
+    """Aplica descuento antes del impuesto; ambos porcentajes van de 0 a 100."""
+    porcentajes = []
+    for nombre, valor in (("impuesto", impuesto), ("descuento", descuento)):
+        if isinstance(valor, bool):
+            raise ValidacionError("El {} debe ser un porcentaje numérico.".format(nombre))
+        try:
+            porcentaje = float(valor)
+        except (TypeError, ValueError) as exc:
+            raise ValidacionError(
+                "El {} debe ser un porcentaje numérico.".format(nombre)
+            ) from exc
+        if not math.isfinite(porcentaje) or not 0 <= porcentaje <= 100:
+            raise ValidacionError(
+                "El {} debe estar entre 0 y 100.".format(nombre.capitalize())
+            )
+        porcentajes.append(porcentaje)
+    impuesto_validado, descuento_validado = porcentajes
+    return subtotal * (1 - descuento_validado / 100) * (1 + impuesto_validado / 100)
+
+
 #Clase estado de reserva
 class EstadoReserva(Enum):
     PENDIENTE = "pendiente"
@@ -283,9 +358,9 @@ class EstadoReserva(Enum):
     CANCELADA = "cancelada"
     PROCESADA = "procesada"
 
-#clase servicio de reserva
-class Reserva(Servicio):
-    """Reserva que envuelve un servicio reservado."""
+#Clase reserva
+class Reserva(EntidadSistema):
+    """Reserva que integra un cliente con el servicio que ha solicitado."""
     def __init__(self, codigo: str, cliente: Cliente, servicio: Servicio, duracion: float,
     estado: EstadoReserva = EstadoReserva.PENDIENTE,) -> None:
         if not isinstance(cliente, Cliente):
@@ -294,7 +369,7 @@ class Reserva(Servicio):
             raise ValidacionError("La reserva requiere un objeto Servicio.")
         if not isinstance(estado, EstadoReserva):
             raise ValidacionError("El estado inicial de la reserva no es válido.")
-        super().__init__(codigo, servicio.tarifa)
+        super().__init__(codigo)
         try:
             self._duracion = servicio.validar_parametros(duracion)
         except ValidacionError as exc:
@@ -329,10 +404,14 @@ class Reserva(Servicio):
     def costo(self) -> Optional[float]:
         return self._costo
 
-    def calcular_precio(self, duracion: float) -> float:
+    def calcular_precio(
+        self, duracion: float, impuesto: float = 0.0, descuento: float = 0.0
+    ) -> float:
         """Delega el cálculo al servicio asociado a la reserva."""
         duracion_validada = self.validar_parametros(duracion)
-        return self._servicio.calcular_precio(duracion_validada)
+        return self._servicio.calcular_precio(
+            duracion_validada, impuesto=impuesto, descuento=descuento
+        )
 
     def describir_servicio(self) -> str:
         """Describe la reserva junto con el servicio que incluye."""
@@ -357,12 +436,12 @@ class Reserva(Servicio):
         self._estado = EstadoReserva.CANCELADA
         LOG.info("Reserva %s cancelada.", self.codigo)
 
-#proecesar reserva
-    def procesar(self) -> float:
+#procesar reserva
+    def procesar(self, impuesto: float = 0.0, descuento: float = 0.0) -> float:
         if self._estado is not EstadoReserva.CONFIRMADA:
             raise EstadoReservaError("Solo se puede procesar una reserva confirmada.")
         try:
-            self._costo = self.calcular_precio(self._duracion)
+            self._costo = self.calcular_precio(self._duracion, impuesto=impuesto, descuento=descuento)
             self._estado = EstadoReserva.PROCESADA
             LOG.info("Reserva %s procesada. Costo: %.2f.", self.codigo, self._costo)
             return self._costo
@@ -376,8 +455,8 @@ class Reserva(Servicio):
     def cancelacion(self) -> None:
         self.cancelar()
 
-    def procesamiento(self) -> float:
-        return self.procesar()
+    def procesamiento(self, impuesto: float = 0.0, descuento: float = 0.0) -> float:
+        return self.procesar(impuesto=impuesto, descuento=descuento)
 
     def definir_entidad(self) -> str:
         return "Reserva"
@@ -385,11 +464,7 @@ class Reserva(Servicio):
     def __str__(self) -> str:
         costo = "pendiente" if self.costo is None else "{:.2f}".format(self.costo)
         return "{} | {} | {} | {} horas | costo: {}".format(
-            self.codigo,
-            self.cliente.nombre,
-            self.servicio.nombre,
-            self.duracion,
-            costo,)
+            self.codigo, self.cliente.nombre, self.servicio.nombre, self.duracion, costo,)
 
 #clase sistema de gestion de datos
 class SistemaGestion:
@@ -401,8 +476,8 @@ class SistemaGestion:
         self._reservas: Dict[str, Reserva] = {}
         self._contador_reservas = 1
 
-    def registrar_cliente(self, cliente_o_nombre: Union[Cliente, str], cedula: Optional[str] = None,
-        telefono: Optional[str] = None, correo_electronico: Optional[str] = None,) -> Cliente:
+    def registrar_cliente(self, cliente_o_nombre: Union[Cliente, str], cedula: Optional[Union[str, int]] = None,
+        telefono: Optional[Union[str, int]] = None, correo_electronico: Optional[str] = None,) -> Cliente:
         if isinstance(cliente_o_nombre, Cliente):
             if any(dato is not None for dato in (cedula, telefono, correo_electronico)):
                 raise ValidacionError("Pasa un Cliente o sus datos, pero no ambas formas.")
@@ -415,7 +490,6 @@ class SistemaGestion:
             cliente = Cliente(cliente_o_nombre, cedula, telefono, correo_electronico)
         if cliente.cedula in self._clientes:
             error = EntidadDuplicadaError("Ya existe un cliente con esa cédula.")
-            LOG.error("Intento de registrar un cliente duplicado.")
             raise error
         self._clientes[cliente.cedula] = cliente
         LOG.info("Cliente registrado.")
@@ -436,10 +510,10 @@ class SistemaGestion:
             raise ValidacionError("La reserva requiere un objeto Cliente.")
         if not isinstance(servicio, Servicio):
             raise ValidacionError("La reserva requiere un objeto Servicio.")
-        if cliente.cedula not in self._clientes:
+        if self._clientes.get(cliente.cedula) is not cliente:
             raise EntidadNoEncontradaError("El cliente debe estar registrado antes de reservar.")
         clave_servicio = servicio.nombre.casefold()
-        if clave_servicio not in self._servicios:
+        if self._servicios.get(clave_servicio) is not servicio:
             raise EntidadNoEncontradaError("El servicio debe estar registrado antes de reservar.")
         codigo = "R{:04d}".format(self._contador_reservas)
         try:
@@ -454,7 +528,7 @@ class SistemaGestion:
         LOG.info("Reserva %s creada.", codigo)
         return reserva
 
-    def obtener_cliente(self, cedula: str) -> Cliente:
+    def obtener_cliente(self, cedula: Union[str, int]) -> Cliente:
         try:
             return self._clientes[Cliente._validar_cedula(cedula)]
         except KeyError as exc:
@@ -493,52 +567,106 @@ class SistemaGestion:
 
 #demostracion de funcionalidad del sistema
 def demostrar_sistema() -> None:
-    """Ejemplo de gestión y de los tres patrones de manejo de excepciones."""
+    """Ejecuta escenarios válidos e inválidos y continúa tras los errores previstos."""
     sistema = SistemaGestion()
-    cliente = sistema.registrar_cliente("Ana Pérez", "12345678", "+57 300 123 4567", "ana@example.com")
-    servicio = sistema.registrar_servicio(ServicioConsultoria("Asesoría", tarifa=80))
-    sistema.registrar_servicio(ServicioMantenimiento("Mantenimiento", tarifa=55, cargo_materiales=20))
-    sistema.registrar_servicio(ServicioPaquete("Paquete integral", tarifa=150))
-    sistema.registrar_servicio(ServicioAlquiler("Alquiler de equipos", tarifa=35))
-    sistema.registrar_servicio(ServicioAsesorias("Asesoría especializada", tarifa=120))
+    operaciones = [0]
 
-    #uso de bloque try/except. Captura una búsqueda fallida y permite continuar.
+    def operar(nombre: str, accion):
+        operaciones[0] += 1
+        numero = operaciones[0]
+        LOG.info("Inicio de operación %02d: %s.", numero, nombre)
+        try:
+            return accion()
+        finally:
+            LOG.info("Fin de operación %02d: %s.", numero, nombre)
+    cliente = operar("registro válido de cliente",
+        lambda: sistema.registrar_cliente("Marcela Alejandra Diaz", "1053654976", "+57 315 140 4210", "marcelaperz@gmail.com"),)
     try:
-        sistema.obtener_cliente("0000000000")
-    except EntidadNoEncontradaError as exc:
-        print("[try/except] Búsqueda controlada:", exc)
-
-    #uso de bloque try/except/else. El bloque else corre solo si no hubo error.
+        operar("registro inválido de cliente",
+            lambda: sistema.registrar_cliente("Cliente inválido", "abc123", "3001234567", "correo-invalido"),)
+    except ValidacionError as exc:
+        print("[try/except] Registro inválido controlado:", exc)
     try:
-        servicio_encontrado = sistema.obtener_servicio(servicio.nombre)
-    except EntidadNoEncontradaError as exc:
-        LOG.exception("No se encontró el servicio de la demostración.")
-        print("[try/except/else] Error al buscar el servicio:", exc)
+        operar("registro duplicado de cliente", lambda: sistema.registrar_cliente(
+                "Otro nombre", cliente.cedula, "3123343426", "Juliandbmarin@hotmail.com"),)
+    except EntidadDuplicadaError as exc:
+        print("[try/except/else] Duplicado controlado:", exc)
     else:
-        print("[try/except/else] Servicio encontrado:",
-              servicio_encontrado.describir_servicio())
-    reserva = sistema.crear_reserva(cliente, servicio, duracion=2)
+        raise AssertionError("El sistema aceptó un cliente duplicado.")
+    sala = operar("registro de servicio de salas", lambda: sistema.registrar_servicio(ServicioReservaSalas("Sala principal", 45)),)
+    consultoria = operar("registro de servicio de asesoría",
+        lambda: sistema.registrar_servicio(ServicioConsultoria("Consultoría", 80)),)
 
-    #uso de bloque try/except/finally. El bloque finally siempre se ejecuta.
     try:
-        reserva.confirmar()
-        costo = reserva.procesar()
-    except (SistemaGestionError, OSError) as exc:
-        LOG.exception("No se pudo completar la reserva de demostración.")
-        print("[try/except/finally] Error al procesar:", exc)
+        operar("creación de servicio con tarifa inválida", lambda: sistema.registrar_servicio(ServicioConsultoria("Servicio inválido", -50)),)
+    except ValidacionError as exc:
+        print("Creación inválida de servicio controlada:", exc)
+
+    try:
+        operar("registro de un objeto que no es servicio", lambda: sistema.registrar_servicio(object()),)
+    except ValidacionError as exc:
+        print("Tipo de servicio inválido controlado:", exc)
+
+    try:
+        operar("reserva con duración inválida", lambda: sistema.crear_reserva(cliente, consultoria, duracion=99),)
+    except ReservaError as exc:
+        print("Reserva fallida controlada:", exc)
+
+    try:
+        operar("reserva de servicio no registrado", lambda: sistema.crear_reserva(cliente, ServicioAlquiler("Equipo no registrado", 25), duracion=2),)
+    except EntidadNoEncontradaError as exc:
+        print("Servicio no disponible controlado:", exc)
+
+    reserva = operar("creación de reserva válida", lambda: sistema.crear_reserva(cliente, consultoria, duracion=2),)
+    operar("confirmación de reserva", reserva.confirmar)
+
+    try:
+        costo = operar("procesamiento con descuento e impuesto", lambda: reserva.procesar(impuesto=19, descuento=10),)
+    except SistemaGestionError as exc:
+        LOG.exception("No se pudo procesar la reserva de demostración.")
+        print("[try/except/finally] Error controlado:", exc)
+        raise
     else:
         print(reserva)
         print("Estado:", reserva.estado.value)
-        print("Costo final: ${:.2f}".format(costo))
+        print("Costo con descuento e impuesto: ${:.2f}".format(costo))
     finally:
         print("[try/except/finally] Fin del intento de procesamiento.")
-    print("Descripción:", servicio.describir_servicio())
+
+    operar("búsqueda de reserva por código", lambda: sistema.buscar_reservas(codigo=reserva.codigo),)
+    operar("búsqueda de reservas por cliente", lambda: sistema.buscar_reservas(cliente=cliente),)
+
+    try:
+        operar("intento de reprocesar reserva", reserva.procesar)
+    except EstadoReservaError as exc:
+        print("Transición de estado inválida controlada:", exc)
+
+    reserva_sala = operar("creación de reserva de sala", lambda: sistema.crear_reserva(cliente, sala, duracion=2),)
+    operar("cancelación de reserva pendiente", reserva_sala.cancelar)
+
+    try:
+        operar("intento de cancelar reserva ya cancelada", reserva_sala.cancelar)
+    except EstadoReservaError as exc:
+        print("Cancelación inválida controlada:", exc)
+
+    reserva_cancelada = operar("creación de reserva para cancelación confirmada", lambda: sistema.crear_reserva(cliente, sala, duracion=1),)
+    operar("confirmación antes de cancelar", reserva_cancelada.confirmar)
+    operar("cancelación de reserva confirmada", reserva_cancelada.cancelar)
+
+    try:
+        operar("cálculo con porcentaje inválido", lambda: consultoria.calcular_precio(1, impuesto=150))
+    except ValidacionError as exc:
+        print("Porcentaje inválido controlado:", exc)
+
+    print("Operaciones simuladas:", operaciones[0])
+    print("El sistema continuó funcionando después de los errores controlados.")
+
 if __name__ == "__main__":
     try:
         demostrar_sistema()
     except SistemaGestionError as exc:
         LOG.exception("El sistema no pudo completar la demostración.")
-        print("Error:", exc)
+        print("Error del sistema:", exc)
     except OSError as exc:
         LOG.exception("Error del sistema operativo.")
         print("Error del sistema operativo:", exc)
